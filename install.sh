@@ -112,7 +112,7 @@ new_rule = {
     "description": "Globe key: push-to-talk Whisper Free",
     "manipulators": [{
         "type": "basic",
-        "from": {"key_code": "fn", "modifiers": {"optional": []}},
+        "from": {"key_code": "fn", "modifiers": {"optional": ["any"]}},
         "to": [{"shell_command": f"{install_dir}/stt-send.sh start"}],
         "to_after_key_up": [{"shell_command": f"{install_dir}/stt-send.sh stop"}],
     }],
