@@ -3,8 +3,8 @@
 # build.sh — Build a distributable macOS .app bundle and .dmg for Whisper Free.
 #
 # Produces:
-#   ~/Library/Developer/WhisperFree/WhisperFree.app
-#   ~/Library/Developer/WhisperFree/WhisperFree.dmg
+#   app/dist/WhisperFree.app
+#   app/dist/WhisperFree.dmg
 #
 set -euo pipefail
 
@@ -17,6 +17,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="WhisperFree"
 DISPLAY_NAME="Whisper Free"
 BUNDLE_ID="com.local.whisperfree"
+SIGN_IDENTITY_NAME="Whisper Free Dev"
 
 PYTHON_STANDALONE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260414/cpython-3.13.13%2B20260414-aarch64-apple-darwin-install_only.tar.gz"
 
@@ -53,7 +54,7 @@ err() {
 }
 
 # -----------------------------------------------------------------------------
-# Preflight
+# 3. Preflight
 # -----------------------------------------------------------------------------
 log "Preflight checks"
 
@@ -71,14 +72,22 @@ for cmd in swift codesign hdiutil curl tar python3; do
 done
 
 # -----------------------------------------------------------------------------
-# Clean
+# 4. Clean
 # -----------------------------------------------------------------------------
 log "Cleaning stage and dist directories"
+# Finder leaves .DS_Store behind whenever it's previewed the dist folder; that
+# alone makes `rm -rf` fail intermittently. Eject any mounted DMGs first too.
+for d in $(hdiutil info | grep -B 5 "Whisper Free" | awk '/\/dev\/disk/{print $1}'); do
+    hdiutil detach -force "$d" >/dev/null 2>&1 || true
+done
+find "$DIST_DIR" -name ".DS_Store" -delete 2>/dev/null || true
 rm -rf "$STAGE_DIR" "$DIST_DIR"
 mkdir -p "$BUILD_DIR" "$STAGE_DIR" "$DIST_DIR"
+# Clear any lingering xattrs that a prior run might have left on the dist path.
+xattr -cr "$DIST_DIR" 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
-# Compile the Swift app
+# 5. Compile the Swift app
 # -----------------------------------------------------------------------------
 log "Building Swift app (release, arm64)"
 if [[ ! -d "$SWIFT_PKG_DIR" ]]; then
@@ -93,7 +102,7 @@ if [[ ! -f "$SWIFT_BINARY" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Assemble bundle skeleton
+# 6. Assemble bundle skeleton
 # -----------------------------------------------------------------------------
 log "Assembling bundle skeleton"
 STAGE_APP="$STAGE_DIR/$APP_NAME.app"
@@ -120,7 +129,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Download + extract python-build-standalone
+# 7. Download + extract python-build-standalone
 # -----------------------------------------------------------------------------
 if [[ ! -f "$PYTHON_STANDALONE_TARBALL" ]]; then
     log "Downloading python-build-standalone"
@@ -150,7 +159,7 @@ if [[ ! -x "$BUNDLED_PYTHON" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Install Python dependencies
+# 8. Install Python dependencies
 # -----------------------------------------------------------------------------
 if [[ ! -f "$REQUIREMENTS_SRC" ]]; then
     err "requirements.txt missing at $REQUIREMENTS_SRC"
@@ -163,7 +172,7 @@ log "Installing Python requirements into bundle (this can take several minutes)"
 "$BUNDLED_PYTHON" -m pip install -r "$REQUIREMENTS_SRC"
 
 # -----------------------------------------------------------------------------
-# Copy daemon and overlay
+# 9. Copy daemon and overlay
 # -----------------------------------------------------------------------------
 log "Copying daemon and overlay"
 if [[ ! -f "$STT_SRC" ]]; then
@@ -176,67 +185,137 @@ if [[ -d "$OVERLAY_SRC_DIR" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Strip __pycache__ and .pyc
+# 10. Strip __pycache__ and .pyc
 # -----------------------------------------------------------------------------
 log "Stripping __pycache__ directories"
 find "$RES_DIR/python" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 find "$RES_DIR/python" -type f -name '*.pyc' -delete 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
-# Ad-hoc codesign
+# 11. Codesign
+#
+# Prefer the local codesigning identity "$SIGN_IDENTITY_NAME" installed by
+# setup-signing-cert.sh. Signing with a stable self-signed cert (instead of
+# pure ad-hoc) produces a Designated Requirement that matches on bundle ID +
+# cert root hash — both stable across rebuilds — so TCC grants persist.
+# Falls back to ad-hoc if the identity isn't installed.
 # -----------------------------------------------------------------------------
-log "Ad-hoc signing bundle contents"
+if security find-identity 2>/dev/null | grep -q "\"$SIGN_IDENTITY_NAME\""; then
+    SIGN_ID="$SIGN_IDENTITY_NAME"
+    log "Signing with local identity '$SIGN_ID'"
+else
+    SIGN_ID="-"
+    log "warning: '$SIGN_IDENTITY_NAME' not found in keychain — falling back to ad-hoc"
+    log "         (TCC grants will be invalidated on every rebuild)"
+    log "         run ./setup-signing-cert.sh once to fix that."
+fi
+
+# codesign refuses to sign bundles that carry Finder / fileprovider xattrs.
+# Strip them right before signing even though the path should already be clean.
+xattr -cr "$STAGE_APP" 2>/dev/null || true
 
 # Sign every .so and .dylib bottom-up first.
 while IFS= read -r -d '' f; do
-    codesign --sign - --force --timestamp=none "$f" >/dev/null 2>&1 || true
+    codesign --sign "$SIGN_ID" --force --timestamp=none "$f" >/dev/null 2>&1 || true
 done < <(find "$RES_DIR" \( -name '*.so' -o -name '*.dylib' \) -type f -print0)
 
 # Sign any other Mach-O executables under Resources.
 while IFS= read -r -d '' f; do
     if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
-        codesign --sign - --force --timestamp=none "$f" >/dev/null 2>&1 || true
+        codesign --sign "$SIGN_ID" --force --timestamp=none "$f" >/dev/null 2>&1 || true
     fi
 done < <(find "$RES_DIR" -type f -perm -u+x -print0)
 
-# Sign the main executable.
-codesign --sign - --force --timestamp=none "$MACOS_DIR/$APP_NAME" >/dev/null 2>&1 || true
+# Sign the main executable with the stable identifier so the DR references it
+# explicitly rather than inferring from the binary name.
+codesign --sign "$SIGN_ID" --force --timestamp=none -i "$BUNDLE_ID" "$MACOS_DIR/$APP_NAME" >/dev/null 2>&1 || true
 
-log "Signing bundle (final --deep pass)"
-codesign --sign - --force --deep "$STAGE_APP" 2>&1 | grep -v '^$' || true
+log "Signing bundle (one final --deep pass)"
+codesign --sign "$SIGN_ID" --force --deep -i "$BUNDLE_ID" "$STAGE_APP" 2>&1 | grep -v '^$' || true
 
 log "Verifying signature (warnings about nested content are expected)"
 codesign --verify --verbose=2 "$STAGE_APP" 2>&1 || true
 
 # -----------------------------------------------------------------------------
-# Move to dist
+# 12. Move to dist
 # -----------------------------------------------------------------------------
 log "Moving bundle to dist/"
 mv "$STAGE_APP" "$APP_BUNDLE"
 
 # -----------------------------------------------------------------------------
-# Create .dmg
+# 13. Create .dmg with proper installer layout
+#
+# Stage the bundle alongside an Applications symlink so users can drag from
+# left to right without needing to open Finder elsewhere. AppleScript sets the
+# window size and icon positions; this requires Terminal to have Automation
+# permission for Finder (macOS prompts the first time).
 # -----------------------------------------------------------------------------
 log "Creating .dmg"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 DMG_STAGE="$BUILD_DIR/dmg-stage"
+RW_DMG="$BUILD_DIR/$APP_NAME-rw.dmg"
+BG_PNG="$BUILD_DIR/dmg-background.png"
 
-rm -rf "$DMG_STAGE"
-mkdir -p "$DMG_STAGE"
+rm -rf "$DMG_STAGE" "$RW_DMG"
+mkdir -p "$DMG_STAGE/.background"
 ditto "$APP_BUNDLE" "$DMG_STAGE/$APP_NAME.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 
+log "Generating DMG background image"
+swift "$SCRIPT_DIR/dmg-background.swift" "$BG_PNG"
+cp "$BG_PNG" "$DMG_STAGE/.background/background.png"
+
+# Read-write image we can mount and customize.
 hdiutil create \
     -volname "$DISPLAY_NAME" \
     -srcfolder "$DMG_STAGE" \
     -ov \
-    -format UDZO \
-    "$DMG_PATH" >/dev/null
+    -format UDRW \
+    "$RW_DMG" >/dev/null
 
+# Mount it and grab the device + mount point.
+MOUNT_OUTPUT="$(hdiutil attach -nobrowse -readwrite "$RW_DMG")"
+MOUNT_POINT="$(echo "$MOUNT_OUTPUT" | tail -1 | awk '{for(i=3;i<=NF;++i) printf "%s ", $i; print ""}' | sed 's/ *$//')"
+DEVICE="$(echo "$MOUNT_OUTPUT" | head -1 | awk '{print $1}')"
+
+# Wait briefly for Finder to notice the mount.
+sleep 2
+
+osascript <<APPLESCRIPT >/dev/null 2>&1 || log "warning: Finder layout step failed (icons may not be positioned). Approve Automation for Terminal in System Settings if prompted."
+tell application "Finder"
+    tell disk "$DISPLAY_NAME"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        -- 660x400 content area: matches the background PNG dimensions.
+        set the bounds of container window to {200, 200, 860, 600}
+        set viewOpts to the icon view options of container window
+        set arrangement of viewOpts to not arranged
+        set icon size of viewOpts to 128
+        set text size of viewOpts to 14
+        set background picture of viewOpts to file ".background:background.png"
+        set position of item "$APP_NAME.app" of container window to {165, 170}
+        set position of item "Applications" of container window to {495, 170}
+        update without registering applications
+        delay 1
+        close
+    end tell
+end tell
+APPLESCRIPT
+
+sync
+hdiutil detach "$DEVICE" >/dev/null 2>&1 || hdiutil detach -force "$DEVICE" >/dev/null 2>&1 || true
+
+# Convert to compressed read-only DMG.
+rm -f "$DMG_PATH"
+hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/dev/null
+
+rm -f "$RW_DMG"
 rm -rf "$DMG_STAGE"
 
 # -----------------------------------------------------------------------------
-# Summary
+# 14. Summary
 # -----------------------------------------------------------------------------
 BUNDLE_SIZE="$(du -sh "$APP_BUNDLE" | awk '{print $1}')"
 DMG_SIZE="$(du -sh "$DMG_PATH" | awk '{print $1}')"
