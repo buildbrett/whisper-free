@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusMenuItem: NSMenuItem!
     private var permissionsMenuItem: NSMenuItem!
     private var loginItemMenuItem: NSMenuItem!
+    private var pauseMediaMenuItem: NSMenuItem!
     private var pttSubmenu: NSMenu!
     private var signalSources: [DispatchSourceSignal] = []
     private var permissionsPollTimer: Timer?
@@ -93,6 +94,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                        action: #selector(toggleLoginItem), keyEquivalent: "")
         menu.addItem(loginItemMenuItem)
 
+        pauseMediaMenuItem = NSMenuItem(title: "Pause Media During Recording",
+                                        action: #selector(togglePauseMedia),
+                                        keyEquivalent: "")
+        menu.addItem(pauseMediaMenuItem)
+
         let pttItem = NSMenuItem(title: "Push-to-talk Key", action: nil, keyEquivalent: "")
         pttSubmenu = NSMenu()
         for k in PushToTalkKey.allCases {
@@ -121,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         loginItemMenuItem.state = LoginItem.isEnabled ? .on : .off
+        pauseMediaMenuItem.state = Settings.pauseMediaDuringRecording ? .on : .off
         refreshPermissionsMenuLabel()
         let current = Settings.pushToTalkKey
         for item in pttSubmenu.items {
@@ -128,6 +135,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 item.state = (raw == current.rawValue) ? .on : .off
             }
         }
+    }
+
+    @objc private func togglePauseMedia() {
+        Settings.pauseMediaDuringRecording.toggle()
+        pauseMediaMenuItem.state = Settings.pauseMediaDuringRecording ? .on : .off
     }
 
     @objc private func selectPushToTalkKey(_ sender: NSMenuItem) {

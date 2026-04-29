@@ -117,13 +117,14 @@ final class KeyListener {
     // MARK: - Recording transitions
 
     private func startOrStopRecording(start: Bool) {
-        if start {
+        let pauseEnabled = Settings.pauseMediaDuringRecording
+        if start && pauseEnabled {
             // Pause any currently-playing media before recording so speaker
             // output doesn't bleed into the microphone input.
             media.pauseIfPlaying()
         }
         send(start ? "start" : "stop")
-        if !start {
+        if !start && pauseEnabled {
             media.resumeIfWePaused()
         }
     }

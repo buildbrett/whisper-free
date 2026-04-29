@@ -80,6 +80,7 @@ enum PushToTalkKey: String, CaseIterable, Identifiable {
 enum Settings {
     private static let pttKey = "pushToTalkKey"
     private static let didShowOnboardingKey = "didShowPermissionsOnboarding"
+    private static let pauseMediaKey = "pauseMediaDuringRecording"
 
     static var pushToTalkKey: PushToTalkKey {
         get {
@@ -90,5 +91,21 @@ enum Settings {
             return .capsLock
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: pttKey) }
+    }
+
+    /// Whether to send the system Play/Pause media key when recording starts
+    /// and again when it stops. Default on. Some users have a "hot" audio
+    /// device (e.g. Apple Music open but paused, keeping CoreAudio active)
+    /// where our detection heuristic incorrectly thinks audio is playing and
+    /// our Play/Pause toggle inverts state. They can disable this and pause
+    /// manually.
+    static var pauseMediaDuringRecording: Bool {
+        get {
+            // Default true; UserDefaults.bool returns false for missing key,
+            // so flip via a separate "have we ever set this?" check.
+            if UserDefaults.standard.object(forKey: pauseMediaKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: pauseMediaKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: pauseMediaKey) }
     }
 }

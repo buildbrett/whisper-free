@@ -17,13 +17,53 @@ Realistic options:
 
 Direct distribution is several weeks of work. App Store path is several months. Pick one before writing more features.
 
+## Sandbox-compatible architectural rewrites
+
+If we go App Store, the existing daemon architecture has to change. These are the concrete code changes:
+
+- [ ] **Drop Python entirely.** Rewrite the daemon as native Swift using either WhisperKit (CoreML, Apple-blessed) or mlx-swift (still Apple but younger). This is the gating decision; everything else below is small in comparison.
+- [ ] **Bundle the Whisper model.** Downloading model weights from HuggingFace at first run is the same 2.5.2 risk as the Python subprocess. Ship the weights inside the bundle. Adds ~1–1.5 GB to the download but eliminates the runtime download.
+- [ ] **Replace the paste mechanism.** Sandboxed apps can't run `osascript` keystroke injection without `com.apple.security.temporary-exception.apple-events`, which reviewers scrutinize. Use a sandbox-allowed approach (synthesizing CGEvent key presses with the right entitlement, or pasting via the standard pasteboard service).
+- [ ] **Migrate log paths.** Sandboxed apps can't write to `~/Library/Logs/whisper-free/`; logs land at `~/Library/Containers/com.local.whisperfree/Data/Library/Logs/`. One-line code change but a behavior shift for support.
+- [ ] **Verify the media-key approach.** `NSEvent.systemDefined` + bit-packed `data1` for `NX_KEYTYPE_PLAY` works today but uses constants that aren't formally documented. May need a different mechanism under sandbox.
+- [ ] **Verify the global keyboard monitor.** `NSEvent.addGlobalMonitorForEvents` works in sandbox with the right entitlements (Accessibility), but worth confirming early since it's the entire push-to-talk mechanism.
+
 ## Code signing and packaging
 
-- [ ] Apple Developer ID Application certificate + Developer ID Installer certificate.
+- [ ] Apple Developer ID Application certificate + Developer ID Installer certificate (for direct distribution).
+- [ ] 3rd Party Mac Developer Application + Installer certificates + provisioning profile (for App Store, separate chain from Developer ID).
 - [ ] Notarization via `notarytool`, stapled ticket on the `.dmg` and the inner `.app`.
 - [ ] Replace `setup-signing-cert.sh` and the local self-signed identity with the Developer ID flow in `build.sh`.
 - [ ] Write a CI workflow (GitHub Actions on a macOS runner) that builds, signs, notarizes, and uploads the DMG on tag.
-- [ ] Sparkle (or equivalent) for in-app auto-update. Self-hosted appcast feed.
+- [ ] Sparkle (or equivalent) for in-app auto-update on direct distribution. App Store handles updates itself.
+
+## App Store submission infrastructure
+
+- [ ] App Store Connect account + bundle ID registration + app record.
+- [ ] App categories, age rating, pricing tier.
+- [ ] If not free, StoreKit integration + receipt validation + Restore Purchases UI (required by Apple for paid apps).
+- [ ] Marketing assets:
+  - App icon at every required size (16, 32, 64, 128, 256, 512, 1024 px)
+  - Screenshots in macOS sizes
+  - Optional 30-second app preview video
+- [ ] App Store metadata: name, subtitle, keywords, description, support URL.
+- [ ] Localized metadata for at least a few major locales for discoverability (the app itself can stay English-only for v1).
+- [ ] Reviewer demo notes: explain how to trigger push-to-talk, why we need Microphone + Accessibility, expected behavior. Reduces rejection cycles.
+
+## App Store compliance artifacts
+
+Newer requirements that are easy to miss:
+
+- [ ] **`PrivacyInfo.xcprivacy`** — required since spring 2024. Declares data collection types, tracking, and "required-reason" API usage (UserDefaults, FileTimestamp, system info APIs).
+- [ ] **App Privacy "nutrition labels"** in App Store Connect: enumerates data collected and tracking. For us this is mostly negative declarations.
+- [ ] **Encryption export compliance**: `ITSAppUsesNonExemptEncryption = false` in Info.plist if only system crypto is used.
+- [ ] **Hardened Runtime** entitlements list: app sandbox, microphone, audio input, network client (if any runtime fetch remains), plus any temporary-exception entitlements we end up needing.
+
+## Beta and review process
+
+- [ ] TestFlight build distribution: internal testers (up to 100 Apple-ID accounts), then external testers (requires Apple beta review, usually <24 hours).
+- [ ] Plan for several rejection-and-resubmit rounds on first submission. Common rejection reasons for an app like this: 2.5.2 (executable code), 5.1 (privacy disclosure), 4.0 (poor permission-prompt UX).
+- [ ] Re-review on every binary update. Plan release cadence.
 
 ## Menu and UX hygiene
 
@@ -71,6 +111,10 @@ Revisit if: (a) we want to support a "live captioning" feature in addition to di
 - [ ] Multi-chip testing: M1, M2, M3, M4. Memory pressure for the Whisper model differs.
 - [ ] Crash recovery. The daemon already restarts on exit, but bad transcriptions or audio errors should surface to the user instead of silently failing.
 - [ ] Audio device change handling. If the user plugs in headphones mid-recording, we should reopen the input stream rather than hanging.
+- [ ] Sleep/wake handling. If the system sleeps mid-recording, end the recording cleanly rather than leaving the daemon in an indeterminate state.
+- [ ] Microphone-already-in-use handling. User on a Zoom call shouldn't crash us — fall back gracefully and show a clear message.
+- [ ] Multi-display overlay placement. Pick the screen the user is actively on (cursor or focused app), not always main.
+- [ ] Stage Manager / Mission Control / Spaces. Overlay panel should follow the active space.
 - [ ] Log rotation. `stt.log`, `app.log`, and `stt-app.log` grow forever. Cap at e.g. 5 × 1 MB rotated files.
 - [ ] First-launch onboarding beyond permissions. Sample recording, mic test, "this is what it looks like when it works."
 
@@ -100,8 +144,11 @@ Revisit if: (a) we want to support a "live captioning" feature in addition to di
 ## Localization and accessibility
 
 - [ ] Localize the menu, permissions window, and any future preferences UI.
-- [ ] VoiceOver labels on the menu bar status item and any onscreen controls.
+- [ ] VoiceOver labels on the menu bar status item and every onscreen control. Test full read-through with VoiceOver enabled.
+- [ ] Keyboard-only navigation through every menu, window, and dialog. No interaction should require a mouse.
+- [ ] Reduced Motion respected for the orb's animation and the overlay fade.
 - [ ] High-contrast mode review for the orb visualizer.
+- [ ] Color isn't the only signal anywhere. The orb's color shift between recording and transcribing should be paired with a shape, label, or icon change so colorblind users get the same information.
 
 ## Stretch
 
