@@ -118,11 +118,8 @@ final class KeyListener {
 
     private func startOrStopRecording(start: Bool) {
         if start {
-            // Pause any currently-playing media first; the speaker output would
-            // bleed into the microphone input otherwise. Fires asynchronously,
-            // but the actual key event reaches the active media app within tens
-            // of milliseconds — fast enough that mid-sentence speech onset is
-            // already captured cleanly.
+            // Pause any currently-playing media before recording so speaker
+            // output doesn't bleed into the microphone input.
             media.pauseIfPlaying()
         }
         send(start ? "start" : "stop")

@@ -1,31 +1,33 @@
 import AppKit
+import CoreAudio
 import Foundation
 
 /// Pauses any currently-playing system audio at the start of a recording and
-/// resumes it on release. Uses Apple's private MediaRemote framework to detect
-/// whether something is playing, then synthesizes a Play/Pause media key event
-/// so the active media app (Spotify, Apple Music, Safari, Chrome, VLC, etc.)
-/// reacts the same way it would if the user pressed the F8 key.
+/// resumes it on release.
 ///
-/// The MediaRemote APIs are a private framework; they've been stable for years
-/// and every dictation app on the platform uses them. If Apple ever pulls
-/// them, `pauseIfPlaying` becomes a no-op (the framework load returns nil) and
-/// recording still works.
+/// Detection: we ask CoreAudio whether the default output device is running
+/// (`kAudioDevicePropertyDeviceIsRunningSomewhere`). That property is true
+/// whenever any process is sending audio to the speakers — Apple Music,
+/// Spotify, Safari, Chrome, YouTube, VLC, podcast apps, system sounds.
+///
+/// Pausing: we synthesize a Play/Pause media key event (the same one your
+/// keyboard's F8 sends). Anything that registers with the system media key
+/// listener — which is essentially every media app on macOS — reacts.
+///
+/// We previously used Apple's private MediaRemote framework for the detection
+/// step. On macOS 26+ that framework's `IsPlaying` query returns false for
+/// non-entitled apps even when audio is active, so it's unreliable. The
+/// CoreAudio path is public and works regardless of macOS version.
 final class MediaController {
     private var didPauseForRecording = false
 
-    /// If something is currently playing, send Play/Pause and remember that we
-    /// paused. Returns immediately; the actual key event is dispatched on the
-    /// caller's run loop after the async query resolves.
+    /// If something is currently playing, send Play/Pause and remember that
+    /// we paused.
     func pauseIfPlaying() {
-        Self.queryIsPlaying { [weak self] isPlaying in
-            guard let self = self else { return }
-            if isPlaying {
-                Self.sendPlayPause()
-                self.didPauseForRecording = true
-                Log.write("MediaController: paused playing media")
-            }
-        }
+        guard Self.isOutputActive() else { return }
+        Self.sendPlayPause()
+        didPauseForRecording = true
+        Log.write("MediaController: paused playing media")
     }
 
     /// If we paused something earlier, send Play/Pause again to resume it.
@@ -36,27 +38,27 @@ final class MediaController {
         Log.write("MediaController: resumed media")
     }
 
-    // MARK: - MediaRemote bridging
+    // MARK: - Output activity detection
 
-    private typealias GetIsPlayingFn = @convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void
+    private static func isOutputActive() -> Bool {
+        var deviceID: AudioDeviceID = 0
+        var propSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let lookup = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &addr, 0, nil, &propSize, &deviceID
+        )
+        guard lookup == noErr, deviceID != 0 else { return false }
 
-    private static let getIsPlaying: GetIsPlayingFn? = {
-        let url = NSURL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
-        guard let bundle = CFBundleCreate(kCFAllocatorDefault, url) else { return nil }
-        let name = "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString
-        guard let ptr = CFBundleGetFunctionPointerForName(bundle, name) else { return nil }
-        return unsafeBitCast(ptr, to: GetIsPlayingFn.self)
-    }()
-
-    private static func queryIsPlaying(_ completion: @escaping (Bool) -> Void) {
-        guard let function = getIsPlaying else {
-            // Private API isn't available — fail closed (don't pause anything).
-            completion(false)
-            return
-        }
-        function(DispatchQueue.main) { isPlaying in
-            completion(isPlaying)
-        }
+        var isRunning: UInt32 = 0
+        propSize = UInt32(MemoryLayout<UInt32>.size)
+        addr.mSelector = kAudioDevicePropertyDeviceIsRunningSomewhere
+        let query = AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &propSize, &isRunning)
+        return query == noErr && isRunning != 0
     }
 
     // MARK: - Media key synthesis
@@ -65,7 +67,6 @@ final class MediaController {
     // that's still respected by every media app on macOS).
     private static let NX_KEYTYPE_PLAY = 16
 
-    /// Sends both the down and up portions of a system Play/Pause key press.
     private static func sendPlayPause() {
         post(keyType: NX_KEYTYPE_PLAY, isDown: true)
         post(keyType: NX_KEYTYPE_PLAY, isDown: false)
