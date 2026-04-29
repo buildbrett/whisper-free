@@ -92,6 +92,7 @@ Currently using `mlx-community/whisper-large-v3-turbo`. It's the best balance of
 - [ ] Custom vocabulary / `initial_prompt` setting. Especially valuable for users with technical jargon, proper nouns, or non-English names that Whisper mangles.
 - [ ] Language selection. Currently auto-detect; some users want to lock it.
 - [ ] Voice Activity Detection (VAD) to auto-stop after silence, in addition to manual release.
+- [ ] **Evaluate quantized Whisper variants for size and speed** (post-Swift-migration). The Swift migration ships with the FP16 `large-v3-turbo` model (~1.6 GB) so that any performance or quality difference is attributable purely to the runtime swap, not to precision. Once the Swift port is at parity with the Python pipeline, A/B test the `_632MB` (4-bit) and `_547MB` (mixed-quant) builds against FP16 on the same fixture set. If either matches FP16 quality within the WER threshold, swap to it for a ~1 GB bundle reduction. Reversible — just swap the model file in `Resources/Models/` and rebuild.
 
 ### Streaming transcription — deferred
 

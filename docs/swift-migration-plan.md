@@ -29,7 +29,11 @@ Sizes for the Argmax CoreML turbo variant:
 - `openai_whisper-large-v3-v20240930_turbo_632MB` (4-bit weights, 8-bit activations): ~630 MB
 - `openai_whisper-large-v3-v20240930_turbo_547MB` (mixed quant): ~550 MB
 
-Recommend the `_632MB` 4-bit build. Quality regression vs FP16 turbo is minor on dictation (Argmax reports WER deltas under 1% on common evals); shaving a gigabyte off the bundle matters more than that. End bundle size is roughly 700-750 MB, down from the current 897 MB once Python+numpy+scipy+numba are gone.
+**Use the FP16 build for the migration.** Same precision as the current Python pipeline (`mlx-community/whisper-large-v3-turbo` is also FP16), so any post-migration performance or quality difference is attributable purely to the runtime swap and not to quantization.
+
+Quantized variants (`_632MB`, `_547MB`) are an attractive size optimization but introduce a separate variable. They become a follow-up: once the Swift port is shipping at parity with the Python pipeline, A/B test the quantized builds against the FP16 baseline as a separate, reversible decision. That work is tracked in the BACKLOG, not here.
+
+End bundle size with FP16 model: roughly 1.7 GB (Swift binary + CoreML model). The current 897 MB Python-bundle plus the ~3 GB model that downloads to `~/Library/Caches` at first run nets to ~3.9 GB on disk after first launch; FP16-bundled is ~1.7 GB total with no first-launch download. Net disk usage drops; initial download is bigger.
 
 First-run download is rejected: it is the same Guideline 2.5.2 concern that's driving this migration. The model files include compiled CoreML artifacts (`.mlmodelc/coremldata.bin`, `weights/weight.bin`) which reviewers can construe as "executable code" if downloaded post-install. Bundle once, ship once.
 
@@ -90,11 +94,26 @@ Reasoning: the incremental path would mean keeping Python in the bundle while mo
 
 Phases on a branch named `swift-native`:
 
-**Phase 0 — scaffold and dependency wiring (1-2 days).**
+**Phase 0 — performance and quality spike (1-2 days).**
+Before doing any migration work, prove WhisperKit FP16 turbo on the user's actual hardware is at least as fast as the current Python `mlx-whisper` FP16 turbo on a fixture set, with text quality matching within WER < 5%.
+
+Build a minimal standalone Swift CLI (`tools/whisperkit-bench/`, ~50-100 lines) that:
+1. Loads WhisperKit with the FP16 `large-v3-turbo` model.
+2. Reads each fixture WAV from disk, transcribes it, records elapsed time and the resulting text to JSON.
+
+Then run the existing Python pipeline (`stt.py`'s `transcribe()` invoked headless) over the same fixtures, save baseline JSON. Compare:
+- **Speed pass criteria**: WhisperKit ≥ as fast as Python pipeline on average across the fixture set, on the development M-series machine. No clip more than 1.5× slower.
+- **Quality pass criteria**: WER < 5% per clip vs the Python pipeline's output (which we treat as the reference, not as ground truth).
+
+If both criteria pass, commit the spike artifacts and proceed to Phase 1. If either fails, do not proceed: re-evaluate (try mlx-swift's WhisperEx port, or abandon the migration). Better to spend two days finding out than 25 days finding out.
+
+The fixture set should cover the dictation envelope: a short utterance, a long utterance (60s), a clip with technical jargon, a clip with hesitation, a clip with background noise. Save as WAVs in `tests/fixtures/`. These same fixtures get reused in Phase 7's parity tests.
+
+**Phase 0.5 — scaffold and dependency wiring (1-2 days).**
 Add WhisperKit as a SwiftPM dependency in `Package.swift`. Bump `swift-tools-version` only if WhisperKit requires it (currently 5.9 should be enough). Add an entitlements file and wire `build.sh` to apply it during codesign.
 
 **Phase 1 — model bundling (1 day).**
-Pull the `_632MB` turbo CoreML package from `argmaxinc/whisperkit-coreml`. Add a `download-model.sh` step in `build.sh` that fetches and verifies it, then copies it to `Resources/Models/whisper-large-v3-turbo`. Cache the download in `~/Library/Caches/WhisperFreeBuild/` like the Python tarball is cached today.
+Pull the FP16 turbo CoreML package from `argmaxinc/whisperkit-coreml`. Add a `download-model.sh` step in `build.sh` that fetches and verifies it, then copies it to `Resources/Models/whisper-large-v3-turbo`. Cache the download in `~/Library/Caches/WhisperFreeBuild/` like the Python tarball is cached today.
 
 **Phase 2 — inference engine (3-5 days).**
 New file `Sources/WhisperFree/InferenceEngine.swift`. Wraps `WhisperKit` with `init(modelFolder:)`, async `transcribe(audio: [Float]) -> String`, and a one-shot warm-up call on app launch. Use a `@MainActor`-isolated facade for state, `nonisolated` for the inference call. Keep one WhisperKit instance for the life of the app.
@@ -152,7 +171,7 @@ The bundled Python interpreter and entire site-packages tree (numpy, mlx, mlx-wh
 
 ## 7. Risk register
 
-**WhisperKit perf below mlx-whisper turbo on M1.** Severity: high (a perf regression is a UX regression on the user's primary machine, an M1). Likelihood: low to medium. WhisperKit on ANE typically beats GPU-only mlx-whisper on M1 for the encoder, but the decoder runs on GPU regardless and the cross-runtime comparison varies by clip length. Mitigation: benchmark on M1 before deleting `stt.py`. If we see >20% regression on the parity clip set, fall back to `_547MB` mixed-quant build, then to FP16 if needed; final fallback is mlx-swift-examples WhisperEx, with a 5-day schedule add.
+**WhisperKit FP16 perf below mlx-whisper FP16 turbo.** Severity: medium. Likelihood: low. Both runtimes execute the same OpenAI weights at the same precision; differences come down to CoreML/ANE pipeline overhead vs Metal kernel speed. WhisperKit on ANE typically ties or beats GPU-only mlx-whisper for the encoder. Mitigation is fully covered by Phase 0: the spike tells us before we invest any migration time. If Phase 0 fails the speed criterion, the migration doesn't start.
 
 **Argmax licensing or maintenance shift.** Severity: medium. Likelihood: low. WhisperKit is MIT and Argmax has an obvious commercial interest in keeping it healthy (their hosted product depends on it). The CoreML model packages on the HF repo are MIT under OpenAI's original Whisper licence (MIT). If Argmax pivots, the SwiftPM package keeps working at the pinned version, and we'd have time to fork or migrate.
 
@@ -184,7 +203,8 @@ The bundled Python interpreter and entire site-packages tree (numpy, mlx, mlx-wh
 
 | Phase | Days (single developer) |
 | --- | --- |
-| 0. Scaffold and dependencies | 1-2 |
+| 0. Performance and quality spike | 1-2 |
+| 0.5. Scaffold and dependencies | 1-2 |
 | 1. Model bundling | 1 |
 | 2. Inference engine | 3-5 |
 | 3. Audio capture | 3-4 |
@@ -192,16 +212,18 @@ The bundled Python interpreter and entire site-packages tree (numpy, mlx, mlx-wh
 | 5. Wire-up and delete sockets | 2-3 |
 | 6. Entitlements, signing, build pipeline | 2-3 |
 | 7. Parity testing and tuning | 3-5 |
-| **Total** | **16-25** |
+| **Total** | **17-27** |
 
 Double if you want to be honest about distractions. So plan for 4-6 weeks calendar time at 50% focus.
+
+Phase 0 is the cheap insurance: if it fails, total cost is 1-2 days, not 17-27.
 
 ## 10. Decisions to make before starting
 
 A pre-flight checklist. Recommended answer first, alternative second, what flips it third.
 
-- [ ] **Inference library: WhisperKit.** Alternative: mlx-swift-examples WhisperEx. Flip if WhisperKit's M1 perf regresses by >20% in your benchmark, or if Argmax's HF repo licence terms change.
-- [ ] **Model variant: large-v3-turbo `_632MB` (4-bit).** Alternative: `_547MB` mixed-quant or full FP16 (~1.6 GB). Flip to FP16 if A/B testing shows quality drop you can't tolerate; flip to `_547MB` if A/B shows it's quality-equal at lower size.
+- [ ] **Inference library: WhisperKit.** Alternative: mlx-swift-examples WhisperEx. Flip if Phase 0 spike shows WhisperKit FP16 is materially slower than current mlx-whisper FP16 on the development machine, or if Argmax's HF repo licence terms change.
+- [ ] **Model variant for the migration: FP16 `large-v3-turbo`.** Same precision as current Python pipeline; isolates the runtime swap from any precision change. Quantized variants (`_632MB`, `_547MB`) are an optional follow-up, tracked separately in BACKLOG, evaluated only after the Swift port is at parity.
 - [ ] **Model packaging: bundled in `.app`.** Alternative: first-run download with progress UI. Flip only if you abandon App Store ambitions and ship direct-only forever.
 - [ ] **Migration shape: big-bang on a branch.** Alternative: incremental with sockets-still-up. Flip if you discover during Phase 2 that WhisperKit needs a major rework, in which case keep Python as the inference fallback and migrate audio first.
 - [ ] **Paste mechanism: CGEvent Cmd-V.** Alternative: AXUIElement direct insertion. Flip if Apple rejects CGEvent in App Store review (run a test submission first).
