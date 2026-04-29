@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastAllGranted: Bool = false
     private let keyListener = KeyListener(socketPath: "/tmp/whisper_free.sock",
                                           key: Settings.pushToTalkKey)
+    private let overlay = OverlayController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installSignalHandlers()
         lastAllGranted = PermissionsManager.allGranted
         Log.write("App did finish launching. allGranted=\(lastAllGranted), bundlePath=\(Bundle.main.bundlePath)")
+        overlay.start()
         let started = keyListener.start()
         Log.write("Initial keyListener.start() returned \(started)")
         startPermissionsPolling()
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionsPollTimer?.invalidate()
+        overlay.stop()
         daemon?.shutdown()
     }
 

@@ -180,9 +180,10 @@ if [[ ! -f "$STT_SRC" ]]; then
 fi
 cp "$STT_SRC" "$RES_DIR/stt.py"
 
-if [[ -d "$OVERLAY_SRC_DIR" ]]; then
-    cp -R "$OVERLAY_SRC_DIR" "$RES_DIR/overlay"
-fi
+# The overlay UI is now provided by the Swift app (Orb-based panel). The
+# precompiled overlay/voice-to-text-widget binary is no longer bundled. The
+# daemon's OverlayClient pings the socket before launching anything; since the
+# Swift app binds it on startup, the daemon stays in send-only mode.
 
 # -----------------------------------------------------------------------------
 # 10. Strip __pycache__ and .pyc

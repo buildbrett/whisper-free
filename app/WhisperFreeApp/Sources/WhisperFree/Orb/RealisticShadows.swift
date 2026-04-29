@@ -1,0 +1,39 @@
+// Vendored from https://github.com/metasidd/Orb
+// MIT License — Copyright (c) 2024 Siddhant Mehta
+
+import SwiftUI
+
+struct RealisticShadowModifier: ViewModifier {
+    let colors: [Color]
+    let radius: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: colors,
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .blur(radius: radius * 0.75)
+                    .opacity(0.5)
+                    .offset(y: radius * 0.5)
+            }
+            .background {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: colors,
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .blur(radius: radius * 3)
+                    .opacity(0.3)
+                    .offset(y: radius * 0.75)
+            }
+    }
+}
