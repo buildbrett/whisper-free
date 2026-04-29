@@ -46,13 +46,8 @@ The current menu reads like a developer's debug surface. Decide what a consumer 
 
 ## Models and inference
 
-Currently hardcoded to `mlx-community/whisper-large-v3-turbo`. That's already the speed-optimized variant of large-v3 (encoder unchanged, decoder cut from 32 layers to 4, ~5-8× faster at near-identical accuracy). There is no model that's both bigger *and* faster on the same Metal pipeline; the realistic v2 work is to expose a quantized faster variant for low-end chips and the full `large-v3` for users who'd trade speed for marginal accuracy.
+Currently using `mlx-community/whisper-large-v3-turbo`. It's the best balance of size and speed for our purposes; there's no option to go bigger and faster.
 
-- [ ] Model selector in Preferences:
-  - `whisper-large-v3-turbo` (default, current behavior)
-  - `whisper-large-v3-turbo` 4-bit quantized — faster + smaller, small accuracy loss; good default for M1/M2
-  - `whisper-large-v3` — slower than turbo, marginally more accurate, for users with M3 Pro / M4 headroom
-  - Smaller fallbacks (`medium`, `small`) only if we discover a real low-power tier needs them
 - [ ] First-run model download UI. Right now the model downloads on first transcription with no progress indication; a 3 GB silent download is alarming.
 - [ ] Custom vocabulary / `initial_prompt` setting. Especially valuable for users with technical jargon, proper nouns, or non-English names that Whisper mangles.
 - [ ] Language selection. Currently auto-detect; some users want to lock it.
