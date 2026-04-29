@@ -12,8 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var permissionsPollTimer: Timer?
     private var lastDaemonState: DaemonState = .stopped
     private var lastAllGranted: Bool = false
-    private let keyListener = KeyListener(socketPath: "/tmp/whisper_free.sock",
-                                          key: Settings.pushToTalkKey)
+    private let media = MediaController()
+    private lazy var keyListener = KeyListener(socketPath: "/tmp/whisper_free.sock",
+                                               key: Settings.pushToTalkKey,
+                                               media: media)
     private let overlay = OverlayController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {

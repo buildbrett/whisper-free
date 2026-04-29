@@ -200,6 +200,10 @@ def save_wav(audio: np.ndarray, path: str):
         wf.writeframes(audio_int16.tobytes())
 
 
+_last_paste_at: float = 0.0
+_last_paste_end: str = ""
+
+
 def paste_text(text: str):
     """Set clipboard to text, send ⌘V, then restore the user's previous clipboard.
 
@@ -208,8 +212,24 @@ def paste_text(text: str):
     if the post-paste clipboard still contains our text — that means no other
     process raced in to copy something during the wait, and clobbering the new
     copy would be the wrong thing to do.
+
+    If the previous paste landed within the last 30 seconds and ended without
+    whitespace, we prepend a space so back-to-back transcriptions don't collide
+    (e.g. "Hello." + "How are you" → "Hello. How are you" instead of
+    "Hello.How are you").
     """
     from AppKit import NSPasteboard, NSPasteboardItem
+    global _last_paste_at, _last_paste_end
+
+    if not text:
+        return
+
+    now = time.monotonic()
+    if (now - _last_paste_at < 30.0
+            and _last_paste_end
+            and not _last_paste_end.isspace()
+            and not text[0].isspace()):
+        text = " " + text
 
     pb = NSPasteboard.generalPasteboard()
 
@@ -247,68 +267,10 @@ def paste_text(text: str):
                 items.append(item)
             pb.writeObjects_(items)
 
+    _last_paste_at = now
+    _last_paste_end = text[-1] if text else ""
+
     log.info("Pasted %d chars", len(text))
-
-
-def _pause_media() -> str:
-    """Pause currently playing media. Returns app name if paused, else empty string."""
-    script = '''
-set pausedApp to ""
-try
-    tell application "System Events"
-        if exists process "Spotify" then
-            tell application "Spotify"
-                if player state is playing then
-                    pause
-                    set pausedApp to "Spotify"
-                end if
-            end tell
-        end if
-    end tell
-end try
-if pausedApp is "" then
-    try
-        tell application "System Events"
-            if exists process "Music" then
-                tell application "Music"
-                    if player state is playing then
-                        pause
-                        set pausedApp to "Music"
-                    end if
-                end tell
-            end if
-        end tell
-    end try
-end if
-return pausedApp
-'''
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, check=False, timeout=2,
-        )
-        app = result.stdout.strip()
-        if app:
-            log.info("Paused media: %s", app)
-        return app
-    except subprocess.TimeoutExpired:
-        log.warning("Media pause timed out")
-        return ""
-
-
-def _resume_media(app_name: str):
-    """Resume playback in the specified app."""
-    if not app_name:
-        return
-    try:
-        subprocess.run(
-            ["osascript", "-e", f'tell application "{app_name}" to play'],
-            check=False, timeout=2,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        log.info("Resumed media: %s", app_name)
-    except subprocess.TimeoutExpired:
-        log.warning("Media resume timed out")
 
 
 def _clean_transcription(text: str) -> str:
@@ -361,7 +323,6 @@ def transcribe(mlx_whisper, audio: np.ndarray) -> str:
 def run_server(mlx_whisper):
     overlay = OverlayClient(enabled=ENABLE_OVERLAY, socket_path=OVERLAY_SOCKET_PATH)
     recorder = Recorder(overlay=overlay)
-    paused_app = ""
 
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
@@ -371,17 +332,16 @@ def run_server(mlx_whisper):
     os.chmod(SOCKET_PATH, 0o777)
     log.info("Listening on %s", SOCKET_PATH)
 
+    # Media pause/resume is handled by the Swift host app (it has direct access
+    # to the system NowPlaying state and the media-key event API, which covers
+    # every media app — not just Spotify and Music). The daemon stays focused
+    # on recording and transcription.
     while True:
         try:
             data = server.recv(64)
             cmd = data.decode("utf-8").strip()
 
             if cmd == "start":
-                paused_app = ""
-                def _do_pause():
-                    nonlocal paused_app
-                    paused_app = _pause_media()
-                threading.Thread(target=_do_pause, daemon=True).start()
                 recorder.start()
             elif cmd == "stop":
                 audio = recorder.stop()
@@ -395,14 +355,10 @@ def run_server(mlx_whisper):
                 else:
                     overlay.send("recording_stop")
                     log.info("Recording too short, skipping")
-                _resume_media(paused_app)
-                paused_app = ""
             else:
                 log.warning("Unknown command: %s", cmd)
         except Exception:
             overlay.send("recording_stop")
-            _resume_media(paused_app)
-            paused_app = ""
             log.exception("Error processing command")
 
 

@@ -18,10 +18,12 @@ final class KeyListener {
     private var isDown = false
     private var capsLockOn = false
     private var clientSocket: Int32 = -1
+    private let media: MediaController
 
-    init(socketPath: String, key: PushToTalkKey) {
+    init(socketPath: String, key: PushToTalkKey, media: MediaController) {
         self.socketPath = socketPath
         self.key = key
+        self.media = media
     }
 
     var isInactive: Bool { globalFlagsMonitor == nil }
@@ -90,7 +92,7 @@ final class KeyListener {
             let nowOn = event.modifierFlags.contains(.capsLock)
             if nowOn == capsLockOn { return }
             capsLockOn = nowOn
-            send(nowOn ? "start" : "stop")
+            startOrStopRecording(start: nowOn)
             return
         }
 
@@ -102,14 +104,31 @@ final class KeyListener {
         let down = event.modifierFlags.contains(flag)
         if down == isDown { return }
         isDown = down
-        send(down ? "start" : "stop")
+        startOrStopRecording(start: down)
     }
 
     private func handleKeyEvent(_ event: NSEvent, down: Bool) {
         guard !key.isModifier, event.keyCode == key.keyCode else { return }
         if down == isDown { return }
         isDown = down
-        send(down ? "start" : "stop")
+        startOrStopRecording(start: down)
+    }
+
+    // MARK: - Recording transitions
+
+    private func startOrStopRecording(start: Bool) {
+        if start {
+            // Pause any currently-playing media first; the speaker output would
+            // bleed into the microphone input otherwise. Fires asynchronously,
+            // but the actual key event reaches the active media app within tens
+            // of milliseconds — fast enough that mid-sentence speech onset is
+            // already captured cleanly.
+            media.pauseIfPlaying()
+        }
+        send(start ? "start" : "stop")
+        if !start {
+            media.resumeIfWePaused()
+        }
     }
 
     // MARK: - Socket send
