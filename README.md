@@ -1,85 +1,116 @@
 # Whisper Free
 
-Push-to-talk voice-to-text for macOS. Hold the Globe key, speak, release — your words appear as text in whatever app you're using. Runs entirely on-device. No cloud APIs, no subscriptions, no data leaving your machine.
+Push-to-talk voice-to-text for macOS. Press your push-to-talk key, speak, release — your words appear as text in whatever app you're using. Runs entirely on-device. No cloud APIs, no subscriptions, no data leaving your machine.
 
 ## Requirements
 
-**Apple Silicon Mac only.** This project uses [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework that runs on the Metal GPU in M-series chips. It will not work on Intel Macs.
+- Apple Silicon Mac (M1 or later). [MLX](https://github.com/ml-explore/mlx) does not run on Intel.
+- macOS 13 (Ventura) or later.
 
-- macOS 13 (Ventura) or later
-- Apple Silicon (M1, M2, M3, M4, or later)
-- Python 3.12+
-- [Karabiner-Elements](https://karabiner-elements.pqrs.org/) (for the Globe key hotkey)
-- ~3 GB of disk space for the Whisper model (downloaded on first use)
+Nothing else. The Python interpreter, ML libraries, and Whisper model are bundled inside the app.
 
 ## Install
 
-```
-git clone <repo-url> whisper-free
-cd whisper-free
-./install.sh
-```
+1. Download `WhisperFree.dmg` from the Releases page.
+2. Open the DMG and drag `WhisperFree.app` into `/Applications`.
+3. First launch: the app is ad-hoc signed (no Apple Developer ID), so macOS Gatekeeper will block it. Either right-click `WhisperFree.app` in Finder, choose **Open**, then click **Open** in the confirmation dialog, or run:
 
-The install script will:
+   ```
+   xattr -dr com.apple.quarantine /Applications/WhisperFree.app
+   ```
 
-1. Create a Python virtual environment and install dependencies
-2. Register a background daemon (launchd) that starts automatically at login
-3. Configure Karabiner-Elements to use the Globe (fn) key as push-to-talk
+   Then double-click to launch normally.
 
-On first use, the Whisper model (~3 GB) downloads from Hugging Face automatically. The first transcription will be slow while this happens.
+A microphone icon appears in the menu bar. There is no Dock icon.
 
-### Permissions
+## Permissions
 
-macOS will prompt you to grant these permissions (System Settings > Privacy & Security):
+On first launch, a permissions window asks for two grants:
 
-- **Microphone** — so the daemon can record audio
-- **Accessibility** — so Karabiner-Elements can capture the Globe key, and so transcribed text can be pasted into apps
+- **Microphone** — to record audio.
+- **Accessibility** — used both to detect your push-to-talk key (via NSEvent global monitor) and to paste transcribed text into the active app.
+
+The Permissions window has a Grant button next to each. If clicking Grant produces no system prompt (macOS only prompts once per app), use **Open Settings** and toggle Whisper Free on manually. You can reopen the window any time from the menu bar (mic icon → **Permissions…**).
 
 ## Usage
 
-1. **Hold the Globe (fn) key** — recording starts and a small overlay widget appears
-2. **Speak** — the overlay shows your audio level in real-time
-3. **Release the key** — recording stops, audio is transcribed, and the text is pasted into the active text field
+The default push-to-talk key is **Caps Lock**. Press it once to start recording, press it again to stop. The Caps Lock LED doubles as a recording indicator.
 
-If music is playing in Spotify or Apple Music, it pauses automatically while recording and resumes when you release the key.
+To change the key, click the menu bar mic icon → **Push-to-talk Key** and pick from the list:
+
+- Caps Lock (toggle: press once to start, press again to stop)
+- Right Option, Right Command, Right Shift, Right Control (hold to record, release to stop)
+- F13–F20 (hold to record, release to stop)
+
+Globe (fn) is intentionally not in the list. macOS filters it out of every userspace event API; the only way to catch it is a kernel-level driver such as Karabiner-Elements.
+
+If Spotify or Apple Music is playing, it pauses while you record and resumes when you release.
+
+The menu bar mic icon switches to a slashed mic when permissions are missing.
 
 ## How it works
 
 | Component | Role |
 |---|---|
-| **stt.py** | Background daemon — records audio, runs transcription, pastes text |
-| **stt-send.sh** | Tiny helper that sends start/stop signals to the daemon over a Unix socket |
-| **overlay/voice-to-text-widget** | Native macOS widget that shows recording status and audio levels |
-| **Karabiner-Elements** | Captures Globe key press/release and triggers the shell scripts |
-| **launchd** | Keeps the daemon running and restarts it if it crashes |
+| `WhisperFree.app` (Swift) | Menu-bar controller. Owns the status item, watches the push-to-talk key via NSEvent, signals the daemon over a Unix socket, supervises the daemon process, and handles Launch at Login via `SMAppService`. |
+| `stt.py` (Python daemon) | Records audio, runs transcription, pastes text. Listens on `/tmp/whisper_free.sock` for start/stop signals from the menu-bar app. |
+| Overlay widget | Shown during recording. Displays live audio level and transcription status. |
 
 ### Under the hood
 
-- **[Whisper Large v3 Turbo](https://huggingface.co/mlx-community/whisper-large-v3-turbo)** — OpenAI's speech recognition model, optimized for Apple Silicon via the MLX community
-- **[mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper)** — Runs the Whisper model on-device using Apple's Metal GPU through MLX
-- **[sounddevice](https://python-sounddevice.readthedocs.io/)** — Captures audio from the microphone via PortAudio
-- Transcription is greedy (temperature=0) and each recording is independent (no context carried between transcriptions)
+- [Whisper Large v3 Turbo](https://huggingface.co/mlx-community/whisper-large-v3-turbo), OpenAI's speech recognition model ported to Apple Silicon by the MLX community.
+- [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) runs the model on the Metal GPU via MLX.
+- [sounddevice](https://python-sounddevice.readthedocs.io/) captures audio through PortAudio.
+- The bundled Python interpreter comes from [python-build-standalone](https://github.com/astral-sh/python-build-standalone), which produces a relocatable CPython tree suitable for embedding in a `.app`.
+- Transcription is greedy (`temperature=0`) and each recording is independent (no context carried between transcriptions).
 
 ## Configuration
 
-Environment variables (set in the launchd plist or your shell):
+The push-to-talk key is set from the menu bar. Two environment variables also control behavior:
 
 | Variable | Default | Description |
 |---|---|---|
-| `WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | Hugging Face model to use |
-| `WHISPER_OVERLAY` | `1` | Set to `0` to disable the overlay widget |
+| `WHISPER_MODEL` | `mlx-community/whisper-large-v3-turbo` | Hugging Face model id to load. |
+| `WHISPER_OVERLAY` | `1` | Set to `0` to disable the overlay widget. |
 
-## Uninstall
+To override these, edit `WhisperFree.app/Contents/Info.plist` (adding an `LSEnvironment` dictionary) or launch the app from a shell with the variables exported.
+
+## Build from source
 
 ```
-./uninstall.sh
+cd app
+./setup-signing-cert.sh   # one-time: install a local codesigning identity
+./build.sh
 ```
 
-This stops the daemon, removes the launchd config, and removes the Karabiner hotkey rule. The project files remain in place — delete the directory to fully remove.
+Prerequisites: Apple Silicon Mac, Xcode Command Line Tools (`xcode-select --install`).
+
+The first build downloads a standalone Python runtime (~20 MB) and then installs the Python deps (mlx-whisper, sounddevice, pyobjc, numpy, etc., ~500 MB resolved). It takes a few minutes. Subsequent builds reuse the cached runtime and deps.
+
+`setup-signing-cert.sh` creates a self-signed codesigning identity in your login keychain. macOS will prompt once for your password to confirm codesign can use the key; click "Always Allow". Without this step the build still works, but under ad-hoc signing each rebuild produces a new CDHash, which invalidates every macOS privacy grant (Microphone, Accessibility) — you'd have to re-approve the app each time. With the self-signed identity, the bundle's Designated Requirement is stable across rebuilds and grants stick.
+
+Output (outside the repo so macOS file-provider sync doesn't interfere with signing):
+
+- `~/Library/Developer/WhisperFree/WhisperFree.app` — the bundled app.
+- `~/Library/Developer/WhisperFree/WhisperFree.dmg` — a drag-to-Applications disk image.
 
 ## Known limitations
 
-- **Apple Silicon only** — MLX does not support Intel Macs. There is no CPU-only fallback.
-- **Overlay binary is precompiled** — The `overlay/voice-to-text-widget` is a precompiled ARM64 binary. The source is not currently included in this repo, so the overlay cannot be rebuilt from source. The daemon works without it (set `WHISPER_OVERLAY=0`), but you lose the visual recording indicator.
-- **Media control** — Automatic pause/resume only works with Spotify and Apple Music. Other media apps (browsers, VLC, etc.) are not detected.
-- **Globe key only** — The hotkey is hardcoded to the Globe (fn) key via Karabiner. To use a different key, edit the Karabiner rule in `~/.config/karabiner/karabiner.json`.
+- Apple Silicon only. MLX has no Intel path.
+- Unsigned. First launch needs the Gatekeeper bypass described in Install. If the project is ever distributed more widely it will be signed and notarized.
+- The overlay is a precompiled ARM64 binary; the source is not included in this repo. The daemon runs fine without it (`WHISPER_OVERLAY=0`), you just lose the visual indicator.
+- Media pause/resume covers Spotify and Apple Music only. Browsers, VLC, and other players are not detected.
+- Globe (fn) is unavailable as a push-to-talk key. macOS filters fn out of `CGEventTap`, `NSEvent.addGlobalMonitorForEvents`, and other userspace observation APIs. Karabiner-Elements gets around this with a kernel-level virtual HID driver, which is more dependency than this project wants. Pick another key from the list.
+
+## Uninstall
+
+Drag `/Applications/WhisperFree.app` to the Trash.
+
+Optional cleanup:
+
+```
+rm -rf ~/Library/Logs/whisper-free
+rm -rf ~/Library/Application\ Support/WhisperFree
+```
+
+The second path is only present if the app has written user state there.

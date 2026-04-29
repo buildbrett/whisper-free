@@ -2,9 +2,9 @@
 """
 Push-to-talk voice-to-text daemon using mlx-whisper.
 
-Listens on a Unix socket for start/stop signals (sent by Karabiner),
-records audio while active, transcribes with Whisper on MLX/Metal,
-and pastes the result into the active text field.
+Watches the fn (globe) key directly via a CGEventTap and also listens on a
+Unix socket for start/stop signals, records audio while active, transcribes
+with Whisper on MLX/Metal, and pastes the result into the active text field.
 Also drives a local visual overlay widget via Unix socket events.
 """
 
@@ -25,7 +25,9 @@ from sounddevice import PortAudioError
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-LOG_PATH = os.path.join(_SCRIPT_DIR, "stt.log")
+LOG_DIR = os.path.expanduser("~/Library/Logs/whisper-free")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_PATH = os.path.join(LOG_DIR, "stt.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -367,6 +369,59 @@ def run_server(mlx_whisper):
             log.exception("Error processing command")
 
 
+def start_fn_listener():
+    """Send start/stop to the daemon's socket on fn (globe) key press/release.
+
+    Bypasses Karabiner: on recent macOS, the driver can't reliably intercept
+    the globe key, but a userspace CGEventTap sees the fn modifier flag change.
+    Requires Input Monitoring permission for this process.
+    """
+    try:
+        import Quartz as Q
+    except ImportError:
+        log.error("pyobjc Quartz not installed; fn listener disabled")
+        return
+
+    state = {"down": False}
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+
+    def callback(proxy, event_type, event, refcon):
+        if event_type == Q.kCGEventTapDisabledByTimeout or event_type == Q.kCGEventTapDisabledByUserInput:
+            Q.CGEventTapEnable(tap, True)
+            return event
+        flags = Q.CGEventGetFlags(event)
+        fn = bool(flags & Q.kCGEventFlagMaskSecondaryFn)
+        if fn != state["down"]:
+            state["down"] = fn
+            try:
+                client.sendto(b"start" if fn else b"stop", SOCKET_PATH)
+            except OSError:
+                pass
+        return event
+
+    mask = Q.CGEventMaskBit(Q.kCGEventFlagsChanged)
+    tap = Q.CGEventTapCreate(
+        Q.kCGSessionEventTap,
+        Q.kCGHeadInsertEventTap,
+        Q.kCGEventTapOptionListenOnly,
+        mask,
+        callback,
+        None,
+    )
+    if not tap:
+        log.error(
+            "CGEventTapCreate failed — grant Input Monitoring to this Python "
+            "binary in System Settings > Privacy & Security, then restart the daemon"
+        )
+        return
+
+    source = Q.CFMachPortCreateRunLoopSource(None, tap, 0)
+    Q.CFRunLoopAddSource(Q.CFRunLoopGetCurrent(), source, Q.kCFRunLoopDefaultMode)
+    Q.CGEventTapEnable(tap, True)
+    log.info("fn listener started (CGEventTap)")
+    Q.CFRunLoopRun()
+
+
 def cleanup(*args):
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
@@ -382,10 +437,12 @@ def cleanup(*args):
 
 
 def main():
+    log.info("Starting daemon: %s", sys.executable)
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
 
     mlx_whisper = load_model()
+    threading.Thread(target=start_fn_listener, daemon=True).start()
     run_server(mlx_whisper)
 
 
