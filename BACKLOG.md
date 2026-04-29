@@ -46,15 +46,25 @@ The current menu reads like a developer's debug surface. Decide what a consumer 
 
 ## Models and inference
 
-- [ ] Larger model option in Preferences. Currently hardcoded to `mlx-community/whisper-large-v3-turbo`. Offer at least:
-  - `whisper-large-v3` (slower, more accurate)
-  - `whisper-large-v3-turbo` (current default — fast, slightly less accurate)
-  - `whisper-medium` / `small` for users on lower-memory M-series chips
+Currently hardcoded to `mlx-community/whisper-large-v3-turbo`. That's already the speed-optimized variant of large-v3 (encoder unchanged, decoder cut from 32 layers to 4, ~5-8× faster at near-identical accuracy). There is no model that's both bigger *and* faster on the same Metal pipeline; the realistic v2 work is to expose a quantized faster variant for low-end chips and the full `large-v3` for users who'd trade speed for marginal accuracy.
+
+- [ ] Model selector in Preferences:
+  - `whisper-large-v3-turbo` (default, current behavior)
+  - `whisper-large-v3-turbo` 4-bit quantized — faster + smaller, small accuracy loss; good default for M1/M2
+  - `whisper-large-v3` — slower than turbo, marginally more accurate, for users with M3 Pro / M4 headroom
+  - Smaller fallbacks (`medium`, `small`) only if we discover a real low-power tier needs them
 - [ ] First-run model download UI. Right now the model downloads on first transcription with no progress indication; a 3 GB silent download is alarming.
 - [ ] Custom vocabulary / `initial_prompt` setting. Especially valuable for users with technical jargon, proper nouns, or non-English names that Whisper mangles.
-- [ ] Streaming transcription. Show partial results while the user is still speaking; commit on release. Bigger UX win than a faster model.
 - [ ] Language selection. Currently auto-detect; some users want to lock it.
 - [ ] Voice Activity Detection (VAD) to auto-stop after silence, in addition to manual release.
+
+### Streaming transcription — deferred
+
+Considered and intentionally not pursued for now. The idea was to run Whisper on a sliding window every ~500 ms, show committed words as they stabilize via a LocalAgreement-2 algorithm, and keep the actual paste-into-active-app a single event on release (preview shown only in our overlay).
+
+Why deferred: at Turbo's current inference speed on M-series, the post-release wait is already short enough that the perceived-latency gap doesn't justify the engineering. The implementation would add a streaming worker, a LocalAgreement commit state machine, a new overlay UI for committed/tentative text, two new socket message types, plus battery-impact tuning across chip generations. Real cost vs incremental UX gain.
+
+Revisit if: (a) we want to support a "live captioning" feature in addition to dictation, (b) users on slower hardware report objectionable post-release latency on long utterances, or (c) we go fully native Swift/MLX-Swift (a separate large item) and want a flagship feature to differentiate.
 
 ## Quality and reliability
 
