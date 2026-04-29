@@ -79,7 +79,11 @@ final class DaemonController {
             "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
             "HOME": NSHomeDirectory(),
             "USER": NSUserName(),
-            "WHISPER_OVERLAY_BIN": overlayBin
+            "WHISPER_OVERLAY_BIN": overlayBin,
+            // Tell stt.py not to create its own CGEventTap — the Swift app owns
+            // the fn-key listener because TCC's Input Monitoring grant to the
+            // parent app does not propagate to this Python subprocess.
+            "WHISPER_FN_LISTENER": "host"
         ]
         let existing = ProcessInfo.processInfo.environment
         env["LANG"] = existing["LANG"] ?? "en_US.UTF-8"

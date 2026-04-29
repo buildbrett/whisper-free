@@ -7,10 +7,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusMenuItem: NSMenuItem!
     private var permissionsMenuItem: NSMenuItem!
     private var loginItemMenuItem: NSMenuItem!
+    private var pttSubmenu: NSMenu!
     private var signalSources: [DispatchSourceSignal] = []
     private var permissionsPollTimer: Timer?
     private var lastDaemonState: DaemonState = .stopped
     private var lastAllGranted: Bool = false
+    private let keyListener = KeyListener(socketPath: "/tmp/whisper_free.sock",
+                                          key: Settings.pushToTalkKey)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -28,7 +31,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         installSignalHandlers()
         lastAllGranted = PermissionsManager.allGranted
+        Log.write("App did finish launching. allGranted=\(lastAllGranted), bundlePath=\(Bundle.main.bundlePath)")
+        let started = keyListener.start()
+        Log.write("Initial keyListener.start() returned \(started)")
         startPermissionsPolling()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(permissionsChanged),
+            name: .whisperPermissionsChanged,
+            object: nil
+        )
 
         if !PermissionsManager.allGranted {
             // Defer briefly so the status item is visible before the window covers it.
@@ -75,6 +88,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                        action: #selector(toggleLoginItem), keyEquivalent: "")
         menu.addItem(loginItemMenuItem)
 
+        let pttItem = NSMenuItem(title: "Push-to-talk Key", action: nil, keyEquivalent: "")
+        pttSubmenu = NSMenu()
+        for k in PushToTalkKey.allCases {
+            let item = NSMenuItem(title: k.displayName,
+                                  action: #selector(selectPushToTalkKey(_:)),
+                                  keyEquivalent: "")
+            item.representedObject = k.rawValue
+            item.target = self
+            pttSubmenu.addItem(item)
+        }
+        pttItem.submenu = pttSubmenu
+        menu.addItem(pttItem)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Whisper Free",
@@ -91,6 +117,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         loginItemMenuItem.state = LoginItem.isEnabled ? .on : .off
         refreshPermissionsMenuLabel()
+        let current = Settings.pushToTalkKey
+        for item in pttSubmenu.items {
+            if let raw = item.representedObject as? String {
+                item.state = (raw == current.rawValue) ? .on : .off
+            }
+        }
+    }
+
+    @objc private func selectPushToTalkKey(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let key = PushToTalkKey(rawValue: raw) else { return }
+        Settings.pushToTalkKey = key
+        keyListener.setKey(key)
     }
 
     private func refreshPermissionsMenuLabel() {
@@ -128,14 +167,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func permissionsChanged() {
+        checkPermissionsFlip()
+    }
+
     private func checkPermissionsFlip() {
         updateStatusIcon()
         let now = PermissionsManager.allGranted
         defer { lastAllGranted = now }
         if now && !lastAllGranted {
-            // The daemon's CGEventTap was created before the grant existed and
-            // won't retroactively start receiving events. Restart it.
+            keyListener.stop()
+            _ = keyListener.start()
             daemon?.restart()
+        } else if now && keyListener.isInactive {
+            _ = keyListener.start()
         }
     }
 

@@ -35,6 +35,11 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
 struct PermissionsView: View {
     @State private var statuses: [Permission: PermissionStatus] = [:]
     @State private var pollTimer: Timer?
+    @State private var inFlight: Set<Permission> = []
+
+    private var allGranted: Bool {
+        !statuses.isEmpty && statuses.values.allSatisfy { $0 == .granted }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -52,23 +57,30 @@ struct PermissionsView: View {
                     PermissionRow(
                         permission: p,
                         status: statuses[p] ?? .notDetermined,
+                        isRequesting: inFlight.contains(p),
                         onRequest: { request(p) },
                         onOpenSettings: { PermissionsManager.openSettings(for: p) }
                     )
                 }
             }
 
-            if statuses.values.contains(where: { $0 != .granted }) {
+            if !allGranted {
                 Text("macOS only shows its prompt the first time. If clicking Grant does nothing, use Open Settings and toggle Whisper Free on.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("All set. Hold the Globe (fn) key to record.")
+                    .font(.callout)
+                    .foregroundColor(.green)
             }
 
             Spacer(minLength: 0)
 
             HStack {
                 Button("Recheck") { refresh() }
+                Button("Quit & Relaunch") { relaunchApp() }
+                    .help("macOS caches some permissions per-process. Relaunching guarantees new grants take effect.")
                 Spacer()
                 Button("Done") { NSApp.keyWindow?.close() }
                     .keyboardShortcut(.defaultAction)
@@ -83,6 +95,9 @@ struct PermissionsView: View {
             }
         }
         .onDisappear { pollTimer?.invalidate() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refresh()
+        }
     }
 
     private func refresh() {
@@ -90,17 +105,41 @@ struct PermissionsView: View {
         for p in Permission.allCases {
             snapshot[p] = PermissionsManager.status(for: p)
         }
-        statuses = snapshot
+        if snapshot != statuses {
+            statuses = snapshot
+            NotificationCenter.default.post(name: .whisperPermissionsChanged, object: nil)
+        }
     }
 
     private func request(_ p: Permission) {
-        PermissionsManager.request(p) { _ in refresh() }
+        guard !inFlight.contains(p) else { return }
+        inFlight.insert(p)
+        PermissionsManager.request(p) { _ in
+            inFlight.remove(p)
+            refresh()
+        }
     }
+
+    private func relaunchApp() {
+        let url = Bundle.main.bundleURL
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-n", url.path]
+        try? task.run()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.terminate(nil)
+        }
+    }
+}
+
+extension Notification.Name {
+    static let whisperPermissionsChanged = Notification.Name("whisperPermissionsChanged")
 }
 
 private struct PermissionRow: View {
     let permission: Permission
     let status: PermissionStatus
+    let isRequesting: Bool
     let onRequest: () -> Void
     let onOpenSettings: () -> Void
 
@@ -118,6 +157,8 @@ private struct PermissionRow: View {
             Spacer()
             if status == .granted {
                 Text("Granted").foregroundColor(.secondary)
+            } else if isRequesting {
+                ProgressView().controlSize(.small)
             } else {
                 VStack(alignment: .trailing, spacing: 4) {
                     Button("Grant", action: onRequest)

@@ -201,15 +201,52 @@ def save_wav(audio: np.ndarray, path: str):
 
 
 def paste_text(text: str):
-    subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+    """Set clipboard to text, send ⌘V, then restore the user's previous clipboard.
+
+    Snapshots every type on every pasteboard item so non-text contents (RTF,
+    images, file references) are preserved across the paste. Restore only fires
+    if the post-paste clipboard still contains our text — that means no other
+    process raced in to copy something during the wait, and clobbering the new
+    copy would be the wrong thing to do.
+    """
+    from AppKit import NSPasteboard, NSPasteboardItem
+
+    pb = NSPasteboard.generalPasteboard()
+
+    saved = []
+    for item in pb.pasteboardItems() or []:
+        snap = {}
+        for t in item.types() or []:
+            data = item.dataForType_(t)
+            if data is not None:
+                snap[t] = data
+        if snap:
+            saved.append(snap)
+
+    pb.clearContents()
+    pb.setString_forType_(text, "public.utf8-plain-text")
+
     subprocess.run(
-        [
-            "osascript",
-            "-e",
-            'tell application "System Events" to keystroke "v" using command down',
-        ],
+        ["osascript", "-e",
+         'tell application "System Events" to keystroke "v" using command down'],
         check=True,
     )
+
+    # Give the destination app time to actually consume the paste. 0.15s is
+    # usually enough; 0.25 is a safer floor with negligible perceived latency.
+    time.sleep(0.25)
+
+    if pb.stringForType_("public.utf8-plain-text") == text:
+        pb.clearContents()
+        if saved:
+            items = []
+            for snap in saved:
+                item = NSPasteboardItem.alloc().init()
+                for t, data in snap.items():
+                    item.setData_forType_(data, t)
+                items.append(item)
+            pb.writeObjects_(items)
+
     log.info("Pasted %d chars", len(text))
 
 
@@ -382,6 +419,24 @@ def start_fn_listener():
         log.error("pyobjc Quartz not installed; fn listener disabled")
         return
 
+    # CGEventTapOptionListenOnly silently drops events when Input Monitoring
+    # is denied. Preflight + request so macOS surfaces the prompt on first run
+    # and we log a clear message instead of appearing to work but receiving
+    # nothing.
+    try:
+        granted = Q.CGPreflightListenEventAccess()
+        if not granted:
+            log.warning(
+                "Input Monitoring not granted — requesting access. "
+                "Approve WhisperFree in System Settings > Privacy & Security "
+                "> Input Monitoring, then restart the app."
+            )
+            Q.CGRequestListenEventAccess()
+    except AttributeError:
+        # Older pyobjc builds may not expose these. Fall through; the tap
+        # will still be created and the user can grant permission manually.
+        pass
+
     state = {"down": False}
     client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 
@@ -442,7 +497,13 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
 
     mlx_whisper = load_model()
-    threading.Thread(target=start_fn_listener, daemon=True).start()
+    # When the Swift wrapper owns the fn-key listener (WHISPER_FN_LISTENER=host)
+    # skip ours. TCC's Input Monitoring grant to the parent .app doesn't reach
+    # this Python subprocess, so our tap would be silently blind.
+    if os.environ.get("WHISPER_FN_LISTENER", "").lower() != "host":
+        threading.Thread(target=start_fn_listener, daemon=True).start()
+    else:
+        log.info("fn listener delegated to host app")
     run_server(mlx_whisper)
 
 
